@@ -5,3 +5,5 @@ _site/
 *.db
 *.db-*
 backups/
+dist/
+.vercel

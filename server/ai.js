@@ -8,12 +8,7 @@ const rateLimit = require("express-rate-limit");
 const cfg = require("./config");
 const db = require("./db");
 
-db.exec(`CREATE TABLE IF NOT EXISTS ai_usage (
-  day TEXT NOT NULL,             -- YYYY-MM-DD (UTC)
-  who TEXT NOT NULL,             -- user id, or 'ip:<hash>' when sign-in is not required
-  n INTEGER NOT NULL DEFAULT 0,
-  PRIMARY KEY (day, who)
-);`);
+// usage counts live in the ai_usage table (created in db.js)
 
 const SYSTEM = `You are Ollie, a calm, warm panda study coach inside a CISA exam study app.
 Help the learner understand information systems audit concepts in your own words.
@@ -28,9 +23,9 @@ function getClient() {
 }
 
 const today = () => new Date().toISOString().slice(0, 10);
-const used = (who) => (db.prepare("SELECT n FROM ai_usage WHERE day = ? AND who = ?").get(today(), who) || { n: 0 }).n;
-const usedAll = () => db.prepare("SELECT COALESCE(SUM(n),0) n FROM ai_usage WHERE day = ?").get(today()).n;
-const bump = (who) => db.prepare("INSERT INTO ai_usage (day, who, n) VALUES (?, ?, 1) ON CONFLICT(day, who) DO UPDATE SET n = n + 1").run(today(), who);
+const used = async (who) => ((await db.get("SELECT n FROM ai_usage WHERE day = ? AND who = ?", today(), who)) || { n: 0 }).n;
+const usedAll = async () => (await db.get("SELECT COALESCE(SUM(n),0) n FROM ai_usage WHERE day = ?", today())).n;
+const bump = (who) => db.run("INSERT INTO ai_usage (day, who, n) VALUES (?, ?, 1) ON CONFLICT(day, who) DO UPDATE SET n = n + 1", today(), who);
 
 // Messages from the app: a single prompt string or a list of {role, content} turns.
 function cleanMessages(body) {
@@ -53,17 +48,20 @@ function router({ currentUser }) {
   const r = express.Router();
   r.use(rateLimit({ windowMs: 60 * 1000, max: cfg.ai.perMinute, standardHeaders: true, legacyHeaders: false, message: { error: "rate_limited" } }));
 
-  r.post("/", async (req, res) => {
+  r.post("/", async (req, res, next) => {
     if (!cfg.ai.enabled) return res.status(503).json({ error: "ai_off" });
-    const u = currentUser(req);
-    if (!u && cfg.ai.requireSignIn) return res.status(401).json({ error: "signed_out" });
-    const who = u ? u.id : "ip:" + crypto.createHash("sha256").update(cfg.sessionSecret + req.ip).digest("hex").slice(0, 16);
-    if (used(who) >= cfg.ai.perUserDaily) return res.status(429).json({ error: "rate_limited", why: "daily_limit" });
-    if (usedAll() >= cfg.ai.siteDaily) return res.status(429).json({ error: "rate_limited", why: "site_daily_limit" });
+    let u, who, over;
+    try {
+      u = await currentUser(req);
+      if (!u && cfg.ai.requireSignIn) return res.status(401).json({ error: "signed_out" });
+      who = u ? u.id : "ip:" + crypto.createHash("sha256").update(cfg.sessionSecret + req.ip).digest("hex").slice(0, 16);
+      over = (await used(who)) >= cfg.ai.perUserDaily ? "daily_limit" : (await usedAll()) >= cfg.ai.siteDaily ? "site_daily_limit" : "";
+    } catch (e) { return next(e); }
+    if (over) return res.status(429).json({ error: "rate_limited", why: over });
     const messages = cleanMessages(req.body);
     if (!messages) return res.status(400).json({ error: "bad_request" });
     const wantJson = !!(req.body && req.body.json);
-    bump(who);
+    try { await bump(who); } catch (e) { return next(e); }
 
     res.status(200);
     res.set({ "Content-Type": "application/x-ndjson; charset=utf-8", "Cache-Control": "no-store", "X-Accel-Buffering": "no" });

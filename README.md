@@ -42,6 +42,12 @@ Open the link, then:
 
 After the first visit it works offline.
 
+## Deploy on Vercel
+
+Free hosting with Google sign-in, synced progress and the leaderboard, no server to look after.
+Import this repository at [vercel.com/new](https://vercel.com/new), add a Turso database from the Vercel Marketplace and set `SESSION_SECRET`.
+Step by step: [docs/VERCEL.md](docs/VERCEL.md).
+
 ## Self-hosting in short
 
 ```bash

@@ -16,14 +16,21 @@ try {
 const list = v => String(v || "").split(",").map(s => s.trim().toLowerCase()).filter(Boolean);
 const env = process.env;
 
+// On Vercel, fall back to the project's production address when BASE_URL is not set.
+const vercelUrl = env.VERCEL_PROJECT_PRODUCTION_URL ? "https://" + env.VERCEL_PROJECT_PRODUCTION_URL : "";
+
 const cfg = {
   port: +env.PORT || 3000,
   prod: env.NODE_ENV === "production",
-  baseUrl: (env.BASE_URL || "http://localhost:" + (+env.PORT || 3000)).replace(/\/$/, ""),
+  baseUrl: (env.BASE_URL || vercelUrl || "http://localhost:" + (+env.PORT || 3000)).replace(/\/$/, ""),
   googleClientId: env.GOOGLE_CLIENT_ID || "",
   sessionSecret: env.SESSION_SECRET || "",
   sessionDays: +env.SESSION_DAYS || 30,
-  dataDir: path.resolve(env.DATA_DIR || path.join(__dirname, "..", "data")),
+  // Vercel functions can only write to /tmp (and it is not kept), hence the fallback there.
+  dataDir: path.resolve(env.DATA_DIR || (env.VERCEL ? "/tmp/ollie-data" : path.join(__dirname, "..", "data"))),
+  // Hosted database (Turso / libSQL). Needed on Vercel, whose disk is wiped between requests. Blank = local SQLite file.
+  db: { url: env.TURSO_DATABASE_URL || env.DATABASE_URL_LIBSQL || "", authToken: env.TURSO_AUTH_TOKEN || "" },
+  serverless: !!env.VERCEL,
   adminEmails: list(env.ADMIN_EMAILS),
   allowedDomains: list(env.ALLOWED_EMAIL_DOMAINS),   // empty = any Google account
   siteName: env.SITE_NAME || "Ollie CISA Coach",
@@ -50,9 +57,14 @@ const cfg = {
 };
 
 cfg.problems = [];
+if (cfg.serverless && !cfg.db.url) cfg.problems.push("TURSO_DATABASE_URL is not set: on Vercel, accounts and progress will be lost. Add a Turso database (see docs/VERCEL.md).");
 if (!cfg.devAuth && !cfg.googleClientId) cfg.problems.push("GOOGLE_CLIENT_ID is not set. Sign-in is disabled until you add it.");
 if (!cfg.sessionSecret || cfg.sessionSecret.length < 32) {
-  if (cfg.prod) { console.error("SESSION_SECRET must be set to a random string of 32+ characters in production."); process.exit(1); }
+  if (cfg.prod) {
+    const msg = "SESSION_SECRET must be set to a random string of 32+ characters in production.";
+    if (cfg.serverless) throw new Error(msg);   // shows in the Vercel function logs
+    console.error(msg); process.exit(1);
+  }
   cfg.sessionSecret = require("crypto").randomBytes(32).toString("hex");
   cfg.problems.push("SESSION_SECRET not set: using a random one for this run (everyone is signed out on restart).");
 }

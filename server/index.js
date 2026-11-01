@@ -50,21 +50,24 @@ const verifier = cfg.googleClientId ? new OAuth2Client(cfg.googleClientId) : nul
 const escapeHtml = s => String(s).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const publicUser = u => ({ id: pubId(u.id), name: u.name, picture: u.picture, email: u.email, admin: isAdmin(u) });
 
-function currentUser(req) {
+// Express 4 does not catch errors from async handlers; this passes them to the error handler.
+const h = fn => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
+
+async function currentUser(req) {
   const uid = session.read(req);
-  return uid ? db.prepare("SELECT * FROM users WHERE id = ?").get(uid) || null : null;
+  return uid ? (await db.get("SELECT * FROM users WHERE id = ?", uid)) || null : null;
 }
-function needUser(req, res, next) {
-  const u = currentUser(req);
+const needUser = h(async (req, res, next) => {
+  const u = await currentUser(req);
   if (!u) return res.status(401).json({ error: "signed_out" });
   req.user = u; next();
-}
-function needAdmin(req, res, next) {
-  const u = currentUser(req);
+});
+const needAdmin = h(async (req, res, next) => {
+  const u = await currentUser(req);
   if (!u) return res.status(401).json({ error: "signed_out" });
   if (!isAdmin(u)) return res.status(403).json({ error: "not_admin" });
   req.user = u; next();
-}
+});
 // CSRF defence for cookie auth: SameSite=Lax cookie + custom header + same-origin Origin check on writes.
 function csrf(req, res, next) {
   if (req.method === "GET" || req.method === "HEAD") return next();
@@ -81,14 +84,14 @@ api.use(limiter(60 * 1000, 300));
 api.use(csrf);
 api.use(express.json({ limit: "2mb" }));
 
-api.get("/me", (req, res) => {
-  const u = currentUser(req);
+api.get("/me", h(async (req, res) => {
+  const u = await currentUser(req);
   if (!u) return res.json({ user: null });
-  db.prepare("UPDATE users SET last_seen = ? WHERE id = ?").run(now(), u.id);
+  await db.run("UPDATE users SET last_seen = ? WHERE id = ?", now(), u.id);
   res.json({ user: publicUser(u) });
-});
+}));
 
-api.post("/auth/google", limiter(15 * 60 * 1000, 40), async (req, res) => {
+api.post("/auth/google", limiter(15 * 60 * 1000, 40), h(async (req, res) => {
   const cred = req.body && req.body.credential;
   if (typeof cred !== "string" || cred.length > 4096) return res.status(400).json({ error: "bad_credential" });
   let p;
@@ -105,87 +108,91 @@ api.post("/auth/google", limiter(15 * 60 * 1000, 40), async (req, res) => {
   if (!p || !p.sub || !p.email || p.email_verified !== true) return res.status(401).json({ error: "email_not_verified" });
   if (cfg.allowedDomains.length && !cfg.allowedDomains.includes(String(p.email).split("@")[1].toLowerCase())) return res.status(403).json({ error: "domain_not_allowed" });
   const t = now();
-  db.prepare(`INSERT INTO users (id,email,name,picture,created,last_seen) VALUES (?,?,?,?,?,?)
-    ON CONFLICT(id) DO UPDATE SET email=excluded.email, name=excluded.name, picture=excluded.picture, last_seen=excluded.last_seen`)
-    .run(p.sub, p.email, String(p.name || "").slice(0, 120), String(p.picture || "").slice(0, 400), t, t);
+  await db.run(`INSERT INTO users (id,email,name,picture,created,last_seen) VALUES (?,?,?,?,?,?)
+    ON CONFLICT(id) DO UPDATE SET email=excluded.email, name=excluded.name, picture=excluded.picture, last_seen=excluded.last_seen`,
+    p.sub, p.email, String(p.name || "").slice(0, 120), String(p.picture || "").slice(0, 400), t, t);
   session.set(res, p.sub);
-  res.json({ user: publicUser(db.prepare("SELECT * FROM users WHERE id = ?").get(p.sub)) });
-});
+  res.json({ user: publicUser(await db.get("SELECT * FROM users WHERE id = ?", p.sub)) });
+}));
 
 api.post("/auth/logout", (req, res) => { session.clear(res); res.json({ ok: true }); });
 
 // per-account progress (the app stores one JSON document per study profile)
-api.get("/progress/:key", needUser, (req, res) => {
+api.get("/progress/:key", needUser, h(async (req, res) => {
   if (!KEY_RE.test(req.params.key)) return res.status(400).json({ error: "bad_key" });
-  const r = db.prepare("SELECT data, updated FROM progress WHERE uid = ? AND key = ?").get(req.user.id, req.params.key);
+  const r = await db.get("SELECT data, updated FROM progress WHERE uid = ? AND key = ?", req.user.id, req.params.key);
   if (!r) return res.json({ exists: false });
   res.json({ exists: true, updated: r.updated, data: JSON.parse(r.data) });
-});
-api.put("/progress/:key", needUser, limiter(60 * 1000, 120), (req, res) => {
+}));
+api.put("/progress/:key", needUser, limiter(60 * 1000, 120), h(async (req, res) => {
   if (!KEY_RE.test(req.params.key)) return res.status(400).json({ error: "bad_key" });
   const d = req.body && req.body.data;
   if (!d || typeof d !== "object" || Array.isArray(d)) return res.status(400).json({ error: "bad_data" });
-  const n = db.prepare("SELECT COUNT(*) c FROM progress WHERE uid = ?").get(req.user.id).c;
-  const have = db.prepare("SELECT 1 FROM progress WHERE uid = ? AND key = ?").get(req.user.id, req.params.key);
+  const n = (await db.get("SELECT COUNT(*) c FROM progress WHERE uid = ?", req.user.id)).c;
+  const have = await db.get("SELECT 1 x FROM progress WHERE uid = ? AND key = ?", req.user.id, req.params.key);
   if (!have && n >= 12) return res.status(400).json({ error: "too_many_profiles" });
-  db.prepare(`INSERT INTO progress (uid,key,data,updated) VALUES (?,?,?,?)
-    ON CONFLICT(uid,key) DO UPDATE SET data=excluded.data, updated=excluded.updated`)
-    .run(req.user.id, req.params.key, JSON.stringify(d), now());
+  await db.run(`INSERT INTO progress (uid,key,data,updated) VALUES (?,?,?,?)
+    ON CONFLICT(uid,key) DO UPDATE SET data=excluded.data, updated=excluded.updated`,
+    req.user.id, req.params.key, JSON.stringify(d), now());
   res.json({ ok: true });
-});
+}));
 
 // leaderboard (opt-in: a row exists only after the member joins)
 const cleanNick = s => String(s || "").normalize("NFKC").replace(/[\u0000-\u001f<>]/g, "").replace(/\s+/g, " ").trim().slice(0, 20);
-api.get("/leaderboard", needUser, (req, res) => {
-  const rows = db.prepare(`SELECT b.uid, b.nick, b.show_pic, b.streak, b.best, b.wk, b.xp, b.today, u.picture
-    FROM board b JOIN users u ON u.id = b.uid ORDER BY b.wk DESC, b.streak DESC, b.xp DESC LIMIT 200`).all();
+api.get("/leaderboard", needUser, h(async (req, res) => {
+  const rows = await db.all(`SELECT b.uid, b.nick, b.show_pic, b.streak, b.best, b.wk, b.xp, b.today, u.picture
+    FROM board b JOIN users u ON u.id = b.uid ORDER BY b.wk DESC, b.streak DESC, b.xp DESC LIMIT 200`);
   res.json({ rows: rows.map(r => ({ id: pubId(r.uid), nick: r.nick, pic: r.show_pic && /^https:\/\/[^\s"'<>]+$/.test(r.picture || "") ? r.picture : "", streak: r.streak, best: r.best, wk: r.wk, xp: r.xp, today: r.today })) });
-});
-api.put("/board", needUser, limiter(60 * 1000, 60), (req, res) => {
+}));
+api.put("/board", needUser, limiter(60 * 1000, 60), h(async (req, res) => {
   const b = req.body || {}, nick = cleanNick(b.nick);
   if (nick.length < 2) return res.status(400).json({ error: "bad_nick" });
-  db.prepare(`INSERT INTO board (uid,nick,show_pic,streak,best,wk,xp,today,upd) VALUES (?,?,?,?,?,?,?,?,?)
+  await db.run(`INSERT INTO board (uid,nick,show_pic,streak,best,wk,xp,today,upd) VALUES (?,?,?,?,?,?,?,?,?)
     ON CONFLICT(uid) DO UPDATE SET nick=excluded.nick, show_pic=excluded.show_pic, streak=excluded.streak, best=excluded.best,
-      wk=excluded.wk, xp=excluded.xp, today=excluded.today, upd=excluded.upd`)
-    .run(req.user.id, nick, b.pic ? 1 : 0, clampInt(b.streak, 0, 3650), clampInt(b.best, 0, 3650), clampInt(b.wk, 0, 7), clampInt(b.xp, 0, 5e6),
+      wk=excluded.wk, xp=excluded.xp, today=excluded.today, upd=excluded.upd`,
+    req.user.id, nick, b.pic ? 1 : 0, clampInt(b.streak, 0, 3650), clampInt(b.best, 0, 3650), clampInt(b.wk, 0, 7), clampInt(b.xp, 0, 5e6),
       /^\d{4}-\d{2}-\d{2}$/.test(b.today || "") ? b.today : "", now());
   res.json({ ok: true });
-});
-api.delete("/board", needUser, (req, res) => { db.prepare("DELETE FROM board WHERE uid = ?").run(req.user.id); res.json({ ok: true }); });
+}));
+api.delete("/board", needUser, h(async (req, res) => { await db.run("DELETE FROM board WHERE uid = ?", req.user.id); res.json({ ok: true }); }));
 
 // your data, your control
-api.get("/export", needUser, (req, res) => {
+api.get("/export", needUser, h(async (req, res) => {
   const u = req.user;
+  const progress = (await db.all("SELECT key, data, updated FROM progress WHERE uid = ?", u.id)).map(r => ({ key: r.key, updated: r.updated, data: JSON.parse(r.data) }));
+  const leaderboard = (await db.get("SELECT nick, show_pic, streak, best, wk, xp, today, upd FROM board WHERE uid = ?", u.id)) || null;
   res.set("Content-Disposition", 'attachment; filename="my-ollie-data.json"');
-  res.json({
-    account: { email: u.email, name: u.name, created: u.created, lastSeen: u.last_seen },
-    progress: db.prepare("SELECT key, data, updated FROM progress WHERE uid = ?").all(u.id).map(r => ({ key: r.key, updated: r.updated, data: JSON.parse(r.data) })),
-    leaderboard: db.prepare("SELECT nick, show_pic, streak, best, wk, xp, today, upd FROM board WHERE uid = ?").get(u.id) || null
-  });
-});
-api.delete("/me", needUser, (req, res) => { db.prepare("DELETE FROM users WHERE id = ?").run(req.user.id); db.prepare("DELETE FROM ai_usage WHERE who = ?").run(req.user.id); session.clear(res); res.json({ ok: true }); });
+  res.json({ account: { email: u.email, name: u.name, created: u.created, lastSeen: u.last_seen }, progress, leaderboard });
+}));
+api.delete("/me", needUser, h(async (req, res) => {
+  const id = req.user.id;
+  await db.tx([["DELETE FROM progress WHERE uid = ?", id], ["DELETE FROM board WHERE uid = ?", id], ["DELETE FROM ai_usage WHERE who = ?", id], ["DELETE FROM users WHERE id = ?", id]]);
+  session.clear(res); res.json({ ok: true });
+}));
 
 // admin (only emails listed in ADMIN_EMAILS)
-api.get("/admin/stats", needAdmin, (req, res) => {
+api.get("/admin/stats", needAdmin, h(async (req, res) => {
   const d7 = now() - 7 * 864e5, d1 = now() - 864e5;
-  const c = (sql, ...a) => db.prepare(sql).get(...a).c;
+  const c = async (sql, ...a) => (await db.get(sql, ...a)).c;
+  let dbBytes = null;
+  try { if (db.file) dbBytes = fs.statSync(db.file).size; else dbBytes = (await db.get("SELECT page_count * page_size c FROM pragma_page_count(), pragma_page_size()")).c; } catch (e) { /* not available */ }
   res.json({
-    users: c("SELECT COUNT(*) c FROM users"), newThisWeek: c("SELECT COUNT(*) c FROM users WHERE created > ?", d7),
-    active24h: c("SELECT COUNT(*) c FROM users WHERE last_seen > ?", d1), active7d: c("SELECT COUNT(*) c FROM users WHERE last_seen > ?", d7),
-    onBoard: c("SELECT COUNT(*) c FROM board"), progressDocs: c("SELECT COUNT(*) c FROM progress"),
-    aiRequestsToday: cfg.ai.enabled ? c("SELECT COALESCE(SUM(n),0) c FROM ai_usage WHERE day = ?", new Date().toISOString().slice(0, 10)) : null,
-    dbBytes: fs.statSync(path.join(cfg.dataDir, "coach.db")).size
+    users: await c("SELECT COUNT(*) c FROM users"), newThisWeek: await c("SELECT COUNT(*) c FROM users WHERE created > ?", d7),
+    active24h: await c("SELECT COUNT(*) c FROM users WHERE last_seen > ?", d1), active7d: await c("SELECT COUNT(*) c FROM users WHERE last_seen > ?", d7),
+    onBoard: await c("SELECT COUNT(*) c FROM board"), progressDocs: await c("SELECT COUNT(*) c FROM progress"),
+    aiRequestsToday: cfg.ai.enabled ? await c("SELECT COALESCE(SUM(n),0) c FROM ai_usage WHERE day = ?", new Date().toISOString().slice(0, 10)) : null,
+    dbBytes
   });
-});
-api.get("/admin/board", needAdmin, (req, res) => {
-  res.json({ rows: db.prepare("SELECT b.uid, b.nick, b.xp, b.wk, b.upd, u.email FROM board b JOIN users u ON u.id = b.uid ORDER BY b.upd DESC LIMIT 500").all()
+}));
+api.get("/admin/board", needAdmin, h(async (req, res) => {
+  res.json({ rows: (await db.all("SELECT b.uid, b.nick, b.xp, b.wk, b.upd, u.email FROM board b JOIN users u ON u.id = b.uid ORDER BY b.upd DESC LIMIT 500"))
     .map(r => ({ id: pubId(r.uid), nick: r.nick, xp: r.xp, wk: r.wk, upd: r.upd, email: r.email })) });
-});
-api.delete("/admin/board/:id", needAdmin, (req, res) => {
-  const row = db.prepare("SELECT uid FROM board").all().find(r => pubId(r.uid) === req.params.id);
-  if (row) db.prepare("DELETE FROM board WHERE uid = ?").run(row.uid);
+}));
+api.delete("/admin/board/:id", needAdmin, h(async (req, res) => {
+  const row = (await db.all("SELECT uid FROM board")).find(r => pubId(r.uid) === req.params.id);
+  if (row) await db.run("DELETE FROM board WHERE uid = ?", row.uid);
   res.json({ ok: !!row });
-});
+}));
 // optional AI features ("Ask Ollie"), only when ANTHROPIC_API_KEY is set
 api.use("/ask", ai.router({ currentUser }));
 
