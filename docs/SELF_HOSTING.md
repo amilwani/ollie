@@ -106,7 +106,11 @@ cp deploy/Caddyfile.nodocker /etc/caddy/Caddyfile && systemctl reload caddy
 ```
 Backups: `cd /opt/ollie && sudo -u ollie node scripts/backup.js` (cron it as in section 6, without `docker compose exec`).
 
-### Option C: a managed platform (Render, Railway, Fly.io)
+### Option C: Vercel (free, serverless)
+
+Import the repository at vercel.com/new and add a Turso database from the Vercel Marketplace. No disk or volume needed. See [VERCEL.md](VERCEL.md).
+
+### Option D: a managed platform (Render, Railway, Fly.io)
 
 Works, but SQLite needs a **persistent disk/volume** mounted at `DATA_DIR` (usually a paid add-on). On free tiers the disk is wiped on every deploy, so accounts and progress would be lost. Use the Dockerfile, set the environment variables from `.env.example` in the dashboard, and mount a volume at `/app/data`. These platforms give you HTTPS and a domain for free; set `TRUST_PROXY=1`.
 
