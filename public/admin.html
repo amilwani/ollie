@@ -1,0 +1,23 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex"><title>Admin</title>
+<style>:root{--bg:#f6f7f9;--surface:#fff;--ink:#15181e;--muted:#646b78;--acc:#3451d1;--line:#e2e5eb;--bad:#c4421a}@media(prefers-color-scheme:dark){:root{--bg:#12141a;--surface:#1b1e26;--ink:#e8eaf0;--muted:#9aa1ae;--acc:#8fa3ff;--line:#2a2f3a;--bad:#ff8a6b}}body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.5 system-ui,sans-serif}main{max-width:900px;margin:0 auto;padding:20px max(16px,env(safe-area-inset-left,0px)) 60px}h1{font-size:24px}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px}.k{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:12px}.k b{display:block;font-size:26px}.k span{color:var(--muted);font-size:13px}table{width:100%;border-collapse:collapse;background:var(--surface);border:1px solid var(--line);border-radius:12px;overflow:hidden}td,th{padding:8px 10px;border-bottom:1px solid var(--line);text-align:left;font-size:14px}.wrap{overflow-x:auto}button{font:inherit;padding:5px 10px;border-radius:8px;border:1px solid var(--line);background:var(--surface);color:var(--bad);cursor:pointer}a{color:var(--acc)}</style></head><body><main>
+<p><a href="/">← App</a></p><h1>Admin</h1><p id="msg" role="status">Loading…</p>
+<div class="grid" id="stats"></div>
+<h2>Leaderboard entries</h2><p style="color:var(--muted);font-size:13px">Remove entries with an offensive nickname. The person keeps their account and can rejoin with a new nickname.</p>
+<div class="wrap"><table><thead><tr><th>Nickname</th><th>Email</th><th>Week</th><th>XP</th><th>Updated</th><th></th></tr></thead><tbody id="rows"></tbody></table></div>
+<script>
+const H={"X-Requested-With":"ollie"};
+const esc=s=>String(s).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+async function j(u,o){const r=await fetch(u,Object.assign({credentials:"same-origin",headers:H},o));if(!r.ok)throw new Error(r.status);return r.json();}
+async function load(){
+ try{
+  const s=await j("/api/admin/stats");
+  document.getElementById("msg").textContent="";
+  const lab={users:"Accounts",newThisWeek:"New this week",active24h:"Active 24h",active7d:"Active 7 days",onBoard:"On leaderboard",progressDocs:"Progress docs",aiRequestsToday:"AI requests today",dbBytes:"Database size"};
+  document.getElementById("stats").innerHTML=Object.keys(lab).filter(k=>s[k]!==null&&s[k]!==undefined).map(k=>`<div class="k"><b>${k==="dbBytes"?(s[k]/1048576).toFixed(1)+" MB":s[k]}</b><span>${lab[k]}</span></div>`).join("");
+  const b=await j("/api/admin/board");
+  document.getElementById("rows").innerHTML=b.rows.map(r=>`<tr><td>${esc(r.nick)}</td><td>${esc(r.email)}</td><td>${r.wk}/7</td><td>${r.xp}</td><td>${new Date(r.upd).toLocaleString()}</td><td><button data-id="${esc(r.id)}">Remove</button></td></tr>`).join("")||"<tr><td colspan=6>No entries yet.</td></tr>";
+ }catch(e){document.getElementById("msg").textContent=e.message==="401"?"Sign in first (account menu in the app), then reload this page.":"You are not an admin of this site.";}
+}
+document.getElementById("rows").addEventListener("click",async e=>{const id=e.target.dataset&&e.target.dataset.id;if(!id)return;if(!confirm("Remove this leaderboard entry?"))return;await j("/api/admin/board/"+id,{method:"DELETE"});load();});
+load();
+</script></main></body></html>

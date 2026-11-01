@@ -1,0 +1,6 @@
+# Replace with your real domain. Caddy gets and renews the HTTPS certificate automatically.
+# DNS for this name must already point to this server, and ports 80 and 443 must be open.
+coach.example.com {
+	encode zstd gzip
+	reverse_proxy app:3000
+}

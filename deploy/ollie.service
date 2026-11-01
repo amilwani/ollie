@@ -1,0 +1,21 @@
+# Install:  sudo cp deploy/ollie.service /etc/systemd/system/ && sudo systemctl daemon-reload && sudo systemctl enable --now ollie
+# Assumes the app lives in /opt/ollie, is owned by user "ollie", and /opt/ollie/.env is filled in.
+[Unit]
+Description=Ollie CISA Coach
+After=network.target
+
+[Service]
+Type=simple
+User=ollie
+WorkingDirectory=/opt/ollie
+EnvironmentFile=/opt/ollie/.env
+ExecStart=/usr/bin/node /opt/ollie/server/index.js
+Restart=always
+RestartSec=3
+NoNewPrivileges=true
+ProtectSystem=full
+PrivateTmp=true
+ReadWritePaths=/opt/ollie/data
+
+[Install]
+WantedBy=multi-user.target
