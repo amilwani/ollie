@@ -26,6 +26,8 @@ jobs:
           node-version: 22
       - run: node scripts/build-pages.js
       - uses: actions/configure-pages@v5
+        with:
+          enablement: true   # turns Pages on (source: GitHub Actions) the first time, if the token is allowed to
       - uses: actions/upload-pages-artifact@v3
         with:
           path: _site
